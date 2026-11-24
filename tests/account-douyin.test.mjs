@@ -19,11 +19,19 @@ async function fixture(t, pages) {
   const context = () => {
     const page = pages[current];
     const next = page.next === undefined ? null : { disabled: page.next === false, className: '', parentElement: null, getAttribute: () => null };
-    const cards = (page.videos || []).map(video => ({ __reactFiber$test: { memoizedProps: { data: video } } }));
+    const cards = (page.videos || []).map(video => ({ __reactFiber$test: {
+      memoizedProps: page.modern ? {} : { data: video },
+      return: page.modern ? { memoizedProps: { item: video } } : null,
+    } }));
+    const list = {
+      scrollHeight: 900,
+      set scrollTop(value) { assert.equal(value, this.scrollHeight); if (!page.stuck) current++; },
+      querySelector: () => page.footer == null ? null : { innerText: page.footer },
+    };
     return vm.createContext({ Date, document: {
       body: { innerText: page.text || '' },
-      querySelectorAll: selector => selector.includes('video-card-info') ? cards : [],
-      querySelector: () => next,
+      querySelectorAll: selector => selector.includes(page.modern ? 'creator-work-card' : 'video-card-info') ? cards : [],
+      querySelector: selector => selector.includes('list-scroll') ? list : next,
     } });
   };
   const original = globalThis.__douyinTest;
@@ -82,4 +90,40 @@ test('Douyin accepts a single page only with an explicit matching total', async 
 test('Douyin rejects blank or boolean metric values instead of inventing counts', async t => {
   const api = await fixture(t, [{ videos: [{ ...video('101', 5), statistics: { play_count: '' } }], next: false }]);
   await assert.rejects(api.collectDouyinVideos(), /统计数据格式/);
+});
+
+
+test('Douyin reads modern scroll batches and waits for the explicit end marker', async t => {
+  const first = video('7711609872701263130', 124), second = video('7711609872701263131', 0);
+  const api = await fixture(t, [
+    { modern: true, videos: [first], footer: '加载中' },
+    { modern: true, videos: [first, second], footer: '没有更多作品' },
+  ]);
+  const rows = await api.collectDouyinVideos();
+  assert.deepEqual([...rows].map(row => [row.id, row.views]), [[first.aweme_id, 124], [second.aweme_id, 0]]);
+});
+
+test('Douyin accepts a modern end marker that appears without an additional card', async t => {
+  const item = video('101', 5);
+  const api = await fixture(t, [
+    { modern: true, videos: [item] },
+    { modern: true, videos: [item], footer: '没有更多作品' },
+  ]);
+  assert.equal((await api.collectDouyinVideos()).length, 1);
+});
+
+test('Douyin refuses to save modern partial results when scrolling does not progress', async t => {
+  const api = await fixture(t, [{ modern: true, videos: [video('101', 5)], stuck: true }]);
+  await assert.rejects(api.collectDouyinVideos(), /作品列表未变化/);
+});
+
+test('Douyin single-work stats prioritize the exact ID and retain title fallback for old records', async t => {
+  const title = '同名作品', id = '7711609872701263130';
+  const api = await fixture(t, [{ modern: true, videos: [
+    { ...video('7711609872701263100', 7), item_title: title },
+    { ...video(id, 124), item_title: '修改后的标题' },
+  ] }]);
+  assert.equal((await api.collectDouyinWorkMetrics({ id, title })).views, 124);
+  assert.equal((await api.collectDouyinWorkMetrics({ title })).views, 7);
+  assert.equal(await api.collectDouyinWorkMetrics({ id: '7711609872701263999', title }), null);
 });
